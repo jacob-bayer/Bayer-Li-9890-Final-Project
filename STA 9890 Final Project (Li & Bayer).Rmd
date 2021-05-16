@@ -1,0 +1,543 @@
+---
+title: "STA 9890 Final Project Submission"
+author: "Wei Bin (Kelvin) Li & Jacob Bayer"
+date: "5/9/2021"
+output: html_document
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())    #delete objects
+cat("\014")
+```
+
+
+Import the data and call libraries 
+
+
+```{r}
+library(glmnet)
+library(tidyverse)
+library(randomForest)
+library(gridExtra)
+library(grid)
+library(modelr)
+library(reshape)
+library(ggthemes)
+
+set.seed(1)
+
+
+house<-read.csv("house.csv", stringsAsFactors = TRUE)
+
+```
+
+Dimensions of these data
+```{r}
+dim(house)
+```
+
+```{r}
+sapply(house, function(x) round(sum(is.na(x))/nrow(house),2))
+```
+
+
+Creates histograms of the dependent variable and the log transformation of the dependent variable.
+
+
+```{r}
+hist(house$SalePrice/1000, main="Histogram of Sale Price", xlab="Sale Price (in thousands)")
+hist(log(house$SalePrice/1000), main="Histogram of Log Sale Price", xlab="Log of Sale Price (in thousands)")
+```
+
+
+Remove columns with any NA values, leaving us with 62 out of 81 variables.
+
+
+```{r}
+house = house %>% 
+  purrr::discard(~sum(is.na(.x))/length(.x)* 100 >=0.001)
+```
+
+
+Convert years to ages. Convert the dependent variable to thousands and perform a log transformation
+
+
+```{r}
+house$HouseAge       <- as.integer(format(Sys.Date(), "%Y")) - house$YearBuilt
+house$RemodelAge     <- as.integer(format(Sys.Date(), "%Y")) - house$YearRemodAdd
+house$YrSinceSold    <- as.integer(format(Sys.Date(), "%Y")) - house$YrSold
+
+house$SalePriceLog   <- log(house$SalePrice/1000)
+
+dropcols             <- c('Id','YrSold','YearBuilt','YearRemodAdd','SalePrice')
+house                <- house %>%dplyr:: select(-one_of(dropcols))
+```
+
+
+Split up the X variables and the Y variable into a matrix and a vector, respectively. Using the model.matrix() function, creates dummy variables out of the categorical variables.
+
+
+```{r}
+x = model.matrix(SalePriceLog~., house)[,-1]
+y = house$SalePriceLog
+```
+
+
+Identify n and p. Identify the training and test sizes. (80/20)
+
+
+```{r}
+n <- nrow(x) # number of total observations
+p <- ncol(x)    # number of predictors
+n.train <- floor(0.8 * n)
+n.test  <- n - n.train
+
+M <- 100
+
+```
+
+
+Initialize matrices to store coefficients, R-squared values, and time metrics.
+
+
+```{r}
+#LASSO R-SQUARED & TIME TAKEN
+Rsq.test.la     <- rep(0, M)  
+Rsq.train.la    <- rep(0, M)
+Time.taken.la   <- rep(0, M)
+est.coef.la     <- matrix(0, ncol = M, nrow = p + 1)
+row.names(est.coef.la) <- c('(Intercept)',colnames(x))
+
+#ELASTIC NET R-SQUARED & TIME TAKEN
+Rsq.test.en     <- rep(0, M)
+Rsq.train.en    <- rep(0, M)
+Time.taken.en   <- rep(0, M)
+est.coef.en     <- est.coef.la
+
+#RIDGE R-SQUARED & TIME TAKEN
+Rsq.test.ri     <- rep(0, M)
+Rsq.train.ri    <- rep(0, M)
+Time.taken.ri   <- rep(0, M)
+est.coef.ri     <- est.coef.la
+
+
+#RANDOM FOREST R-SQUARED & TIME TAKEN
+Rsq.test.rf     <- rep(0, M)
+Rsq.train.rf    <- rep(0, M)
+Time.taken.rf   <- rep(0, M)
+
+# Matrices for train and test R-squared 
+Rsq.train=matrix(0,M,4)
+colnames(Rsq.train)=c("Lasso","Elastic-Net","Ridge","Random Forest")
+Rsq.test=matrix(0,M,4)
+colnames(Rsq.test)=c("Lasso","Elastic-Net","Ridge","Random Forest")
+
+# Matrix for the time it takes to cross-validate Lasso/Elastic-Net/Ridge regression
+Time.cv=matrix(0,M,3)
+colnames(Time.cv)=c("Lasso","Elastic-Net","Ridge")
+
+
+```
+
+
+For M = 100, randomly split the dataset into two mutually exclusive datasets, test and train, where train is 80% of the original data and test is the other 20%. 
+
+Use the training data to fit lasso, elastic-net, ridge, and random forest.
+
+Tune the CVs using 10-fold cross validation.
+
+Calculate R-squared for the test and training datasets.
+
+
+```{r}
+for (m in c(1:M)) {
+  
+  cat("m = ", m, "\n")
+  
+  shuffled_indexes <-     sample(n)
+  train            <-     shuffled_indexes[1:n.train]
+  test             <-     shuffled_indexes[(1+n.train):n]
+  X.train          <-     x[train, ]
+  y.train          <-     y[train]
+  X.test           <-     x[test, ]
+  y.test           <-     y[test]
+  
+  # Fit lasso and calculate and record the train and test R squares, and estimated coefficients 
+  start.time       <-     Sys.time()
+  cv.fit           <-     cv.glmnet(X.train, y.train, alpha = 1, nfolds = 10)
+  end.time         <-     Sys.time()
+  
+  # new matrix for time
+  Time.cv[m,1]     =      end.time - start.time 
+  fit              <-     glmnet(X.train, y.train, alpha = 1, lambda =    cv.fit$lambda.min)
+  y.train.hat      <-     predict(fit, newx = X.train, type = "response") # y.train.hat=X.train %*% fit$beta + fit$a0
+  y.test.hat       <-     predict(fit, newx = X.test, type = "response")  # y.test.hat=X.test %*% fit$beta  + fit$a0
+  Rsq.test.la[m]   <-     1-mean((y.test - y.test.hat)^2)/mean((y.test - mean(y.test))^2)
+  
+  #new matrix
+  Rsq.test[m,1]    =      1-mean((y.test - y.test.hat)^2)/mean((y.test - mean(y.test))^2)
+  Rsq.train.la[m]  <-     1-mean((y.train - y.train.hat)^2)/mean((y.train - mean(y.train))^2)
+  Rsq.train[m,1]   =      1-mean((y.train - y.train.hat)^2)/mean((y.train - mean(y.train))^2)
+  est.coef.la[,m]   <-     predict(fit, newx = X.test, type = "coefficients")[,1]
+  
+  # Fit elastic-net and calculate and record the train and test R squares, and estimated coefficients  
+  start.time       <-     Sys.time()
+  cv.fit           <-     cv.glmnet(X.train, y.train, alpha = 0.5, nfolds = 10)
+  end.time         <-     Sys.time()
+  Time.cv[m,2]     <-     end.time - start.time
+  fit              <-     glmnet(X.train, y.train, alpha = 0.5, lambda = cv.fit$lambda.min)
+  y.train.hat      <-     predict(fit, newx = X.train, type = "response")
+  y.test.hat       <-     predict(fit, newx = X.test, type = "response") 
+  Rsq.test[m,2]    =      1-mean((y.test - y.test.hat)^2)/mean((y.test - mean(y.test))^2)
+  Rsq.test.en[m]   <-     1-mean((y.test - y.test.hat)^2)/mean((y.test - mean(y.test))^2)
+  Rsq.train.en[m]  <-     1-mean((y.train - y.train.hat)^2)/mean((y.train - mean(y.train))^2)
+  Rsq.train[m,2]   =      1-mean((y.train - y.train.hat)^2)/mean((y.train - mean(y.train))^2)
+  est.coef.en[,m]  <-     predict(fit, newx = X.test, type = "coefficients")[,1]
+    
+  # Fit ridge and calculate and record the train and test R squares, and estimated coefficients 
+  start.time       <-     Sys.time()
+  cv.fit           <-     cv.glmnet(X.train, y.train, alpha = 0, nfolds = 10)
+  end.time         <-     Sys.time()
+  Time.cv[m,3]     <-     end.time - start.time
+  fit              <-     glmnet(X.train, y.train, alpha = 0, lambda = cv.fit$lambda.min)
+  y.train.hat      <-     predict(fit, newx = X.train, type = "response") 
+  y.test.hat       <-     predict(fit, newx = X.test, type = "response") 
+  Rsq.test.ri[m]   <-     1-mean((y.test - y.test.hat)^2)/mean((y.test - mean(y.test))^2)
+  Rsq.test[m,3]    =      1-mean((y.test - y.test.hat)^2)/mean((y.test - mean(y.test))^2)
+  Rsq.train.ri[m]  <-     1-mean((y.train - y.train.hat)^2)/mean((y.train - mean(y.train))^2)
+  Rsq.train[m,3]   =      1-mean((y.train - y.train.hat)^2)/mean((y.train - mean(y.train))^2)
+  est.coef.ri[,m]  <-     predict(fit, newx = X.test, type = "coefficients")[,1]  
+  
+  # Fit RF and calculate and record the train and test R squares, and estimated coefficients  
+  start.time       <-     Sys.time()
+  rf               <-     randomForest(X.train, y.train, mtry = p/3, importance = TRUE)
+  y.test.hat       <-     predict(rf, X.test)
+  y.train.hat      <-     predict(rf, X.train)
+  Rsq.test.rf[m]   <-     1-mean((y.test - y.test.hat)^2)/mean((y.test - mean(y.test))^2)
+  Rsq.test[m,4]    =      1-mean((y.test - y.test.hat)^2)/mean((y.test - mean(y.test))^2)
+  Rsq.train.rf[m]  <-     1-mean((y.train - y.train.hat)^2)/mean((y.train - mean(y.train))^2)
+  Rsq.train[m,4]   =      1-mean((y.train - y.train.hat)^2)/mean((y.train - mean(y.train))^2)
+  end.time         <-     Sys.time()
+  Time.taken.rf[m] <-     end.time - start.time
+  
+  
+  #cat(sprintf("m=%3.f| Rsq.train.rf=%.4f,Rsq.test.rf=%.4f \n, Rsq.train.en=%.4f, Rsq.test.en=%.4f \n, Rsq.train.la=%.4f, Rsq.test.la=%.4f \n, Rsq.train.ri=%.4f,Rsq.test.ri=%.4f \n", m, Rsq.train.rf[m],Rsq.test.rf[m], Rsq.train.en[m], Rsq.test.en[m], Rsq.train.la[m], Rsq.test.la[m], Rsq.train.ri[m], Rsq.test.ri[m]))
+  
+}
+```
+
+
+Plot the CV Curves for Lasso, Elastic net, and ridge regression.
+
+
+```{r}
+#CV curves
+par(mfcol = c(1, 3))
+
+# LASSO
+cv.fit           <-     cv.glmnet(x, y, alpha = 1, nfolds = 10)
+plot(cv.fit)
+title("Lasso", line = 3)
+
+# RIDGE
+cv.fit           <-     cv.glmnet(x, y, alpha = 0, nfolds = 10)
+plot(cv.fit)
+title("Ridge", line = 3)
+
+# ELASTIC NET
+cv.fit           <-     cv.glmnet(x, y, alpha = 0.5, nfolds = 10)
+plot(cv.fit)
+title("Elastic net", line = 3)
+
+```
+
+
+Plot the train and test R-squared values in a boxplot.
+
+
+```{r}
+Rsq.train.boxplot=ggplot(melt(data.frame(Rsq.train)), aes(factor(variable), value,color=variable))+
+  geom_boxplot()+
+  ylim(0.6,1)+
+  ggtitle("R-squared for Train Data")+
+  theme(plot.title=element_text(hjust=0.5))+
+   theme(axis.text.x = element_text(color = "grey20", size = 10, hjust = .5, vjust = .5, face = "plain"),axis.title.y = element_text(color = "grey20", size = 12, angle = 90, hjust = .5, vjust = .5, face = "plain")) + theme(axis.title.y = element_blank(), axis.title.x = element_blank())+
+  theme(legend.position="none")
+ 
+
+Rsq.test.boxplot=ggplot(melt(data.frame(Rsq.test)), aes(factor(variable), value,color=variable))+
+  geom_boxplot()+
+  ylim(0.6,1)+
+  ggtitle("R-squared for Test Data")+
+  theme(plot.title=element_text(hjust=0.5))+
+  theme(axis.text.x = element_text(color = "grey20", size = 10, hjust = .5, vjust = .5, face = "plain"),axis.title.y = element_text(color = "grey20", size = 12, angle = 90, hjust = .5, vjust = .5, face = "plain")) +  theme(axis.title.y = element_blank(), axis.title.x = element_blank())+ 
+  theme(legend.position="none")
+
+Rsq.Boxplot=grid.arrange(Rsq.train.boxplot,Rsq.test.boxplot, nrow = 1)
+```
+
+
+Create a table with the R-squared of each model and the time it takes to run the model.
+
+
+```{r}
+LA_start <- Sys.time()
+cv.la <- cv.glmnet(X.train, y.train, alpha = 1, nfolds = 10)
+la <- glmnet(X.train, y.train, alpha = 1, lambda = cv.la$lambda.min)
+LA_end <- Sys.time()
+yhat.test.la <- predict(la, newx = X.test, type = "response") 
+yhat.train.la <- predict(la, newx = X.train, type = "response") 
+residuals.test.la <- yhat.test.la - y.test
+residuals.train.la <- yhat.train.la - y.train
+LA_time <- LA_end - LA_start
+
+EN_start <- Sys.time()
+cv.en <- cv.glmnet(X.train, y.train, alpha = 0.5, nfolds = 10)
+en <- glmnet(X.train, y.train, alpha = 0.5, lambda = cv.en$lambda.min)
+EN_end <- Sys.time()
+yhat.test.en <- predict(en, newx = X.test, type = "response") 
+yhat.train.en <- predict(en, newx = X.train, type = "response") 
+residuals.test.en <- yhat.test.en - y.test
+residuals.train.en <- yhat.train.en - y.train
+EN_time <- EN_end - EN_start
+
+RI_start <- Sys.time()
+cv.ri <- cv.glmnet(X.train, y.train, alpha = 0, nfolds = 10)
+ri <- glmnet(X.train, y.train, alpha = 0, lambda = cv.ri$lambda.min)
+RI_end <- Sys.time()
+yhat.test.ri <- predict(ri, newx = X.test, type = "response") 
+yhat.train.ri <- predict(ri, newx = X.train, type = "response") 
+residuals.test.ri <- yhat.test.ri - y.test
+residuals.train.ri <- yhat.train.ri - y.train
+RI_time <- RI_end - RI_start
+
+RF_start <- Sys.time()
+set.seed(1)
+rf <- randomForest(X.train, y.train, mtry = p/3, importance = TRUE)
+yhat.test.rf <- predict(rf, X.test)
+yhat.train.rf <- predict(rf, X.train)
+RF_end <-  Sys.time()
+residuals.test.rf <- yhat.test.rf - y.test
+residuals.train.rf <- yhat.train.rf - y.train
+RF_time <- RF_end - RF_start
+
+model <- c('LASSO', 'ELASTIC NET', 'RIDGE', 'RANDOM FOREST')
+performance <- round(c(mean(Rsq.test.la), mean(Rsq.test.en), mean(Rsq.test.ri), mean(Rsq.test.rf)),4)
+time <- round(c(LA_time, EN_time, RI_time, RF_time),4)
+
+comparison <- data.frame(model, performance, time)
+colnames(comparison) <- c('MODEL', 'PERFORMANCE', 'TIME')
+
+plot.new()
+grid.table(comparison)
+```
+
+
+Create boxplots for the training residuals and test residuals.
+
+
+```{r}
+a<-data.frame(model="Ridge", group='test', calc_residuals=residuals.test.ri[,1], stringsAsFactors = T)
+b<-data.frame(model="Ridge", group='train', calc_residuals=residuals.train.ri[,1], stringsAsFactors = T)
+
+c<-data.frame(model="Elastic Net", group='test', calc_residuals=residuals.test.en[,1], stringsAsFactors = T)
+d<-data.frame(model="Elastic Net", group='train', calc_residuals=residuals.train.ri[,1], stringsAsFactors = T)
+
+e<-data.frame(model="Lasso", group='test', calc_residuals=residuals.test.la[,1], stringsAsFactors = T)
+f<-data.frame(model="Lasso", group='train', calc_residuals=residuals.train.ri[,1], stringsAsFactors = T)
+
+g<-data.frame(model="Random Forest", group='test', calc_residuals=residuals.test.rf, stringsAsFactors = T)
+h<-data.frame(model="Random Forest", group='train', calc_residuals=residuals.train.rf, stringsAsFactors = T)
+
+residuals_test = rbind(a,c,e,g)
+residual_boxplot.test = ggplot(residuals_test, aes(x=model, y=calc_residuals, color=model)) + geom_boxplot() + ylim(-0.5,1.5)+ theme(axis.title.x = element_blank(), axis.title.y = element_blank(), legend.position = "None") + ggtitle("Test residual") 
+
+residuals_train = rbind(b,d,f,h)
+residual_boxplot.train = ggplot(residuals_train, aes(x=model, y=calc_residuals, color=model)) + geom_boxplot() + ylim(-0.5,1.5) + theme(axis.title.x = element_blank(), legend.position = "None") + ggtitle("Train residual")+ ylab("residual")
+
+residual.Boxplot=grid.arrange(residual_boxplot.train,residual_boxplot.test, nrow = 1)
+```
+
+
+
+Calculate 90% R-squared confidence intervals.
+
+
+```{r}
+quantile(Rsq.test.en, c(0.05,0.95))
+quantile(Rsq.test.la, c(0.05,0.95))
+quantile(Rsq.test.ri, c(0.05,0.95))
+quantile(Rsq.test.rf, c(0.05,0.95))
+```
+
+
+Performing tests on a single sample.
+
+
+```{r}
+# fit lasso to the whole data
+a=1 # lasso
+cv.fit                 =     cv.glmnet(X.train, y.train, alpha = a, nfolds = 10)
+fit                    =     glmnet(X.train, y.train, alpha = a, lambda = cv.fit$lambda.min)
+betaS.ls               =     data.frame(c(1:p), as.vector(fit$beta))
+colnames(betaS.ls)     =     c( "feature", "value")
+
+# fit en to the whole data
+a=0.5 # elastic-net
+cv.fit                 =     cv.glmnet(X.train, y.train, alpha = a, nfolds = 10)
+fit                    =     glmnet(X.train, y.train, alpha = a, lambda = cv.fit$lambda.min)
+betaS.en               =     data.frame(c(1:p), as.vector(fit$beta))
+colnames(betaS.en)     =     c( "feature", "value")
+
+# fit ridge to the whole data
+a=0 # ridge
+cv.fit                 =     cv.glmnet(X.train, y.train, alpha = a, nfolds = 10)
+fit                    =     glmnet(X.train, y.train, alpha = a, lambda = cv.fit$lambda.min)
+betaS.rd               =     data.frame(c(1:p), as.vector(fit$beta))
+colnames(betaS.rd)     =     c( "feature", "value")
+
+# fit rf to the whole data
+set.seed(1)
+rf                     =     randomForest(X.train, y.train, mtry = p/3, importance = TRUE)
+betaS.rf               =     data.frame(c(1:p), as.vector(rf$importance[,'IncNodePurity']))
+colnames(betaS.rf)     =     c( "feature", "value")
+```
+
+
+Using the coefficients estimated by the models above, we will create a variable importance plot.
+
+
+Entire plot:
+
+
+```{r}
+betaS.en = betaS.en %>% arrange(desc(value))
+
+feature.index = head(betaS.en$feature, -1)
+
+# Sort the other beta matrices using the elastic net matrix and create a new index column.
+betaS.ls.sorted.1 = betaS.ls[feature.index,]
+betaS.rd.sorted.1 = betaS.rd[feature.index,]
+betaS.rf.sorted.1 = betaS.rf[feature.index,]
+
+
+betaS.en$order <- 1:nrow(betaS.en)
+betaS.ls.sorted.1$order <- 1:nrow(betaS.ls.sorted.1)
+betaS.rd.sorted.1$order <- 1:nrow(betaS.rd.sorted.1)
+betaS.rf.sorted.1$order <- 1:nrow(betaS.rf.sorted.1)
+
+
+enPlot =  ggplot(betaS.en, aes(x=order, y=value)) +
+  geom_bar(stat = "identity", fill= "skyblue3", colour="black")    +
+  labs(x = element_blank(), y = "Coefficients", title = expression(Elastic)) + ylim(-0.6,0.2) +
+    scale_x_continuous(breaks=1:nrow(betaS.en), labels=betaS.en$feature) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+lsPlot =  ggplot(betaS.ls.sorted.1, aes(x=order, y=value)) +
+  geom_bar(stat = "identity", fill = "white",  colour="black")    +
+  labs(x = element_blank(), y = "Coefficients", title = expression(Lasso)) + ylim(-0.6,0.2) +
+    scale_x_continuous(breaks=1:nrow(betaS.ls.sorted.1), labels=betaS.ls.sorted.1$feature) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+rdPlot =  ggplot(betaS.rd.sorted.1, aes(x=order, y=value)) +
+  geom_bar(stat = "identity", fill= "white",  colour="black")    +
+  labs(x = element_blank(), y = "Coefficients", title = expression(Ridge)) + ylim(-0.6,0.2) +
+    scale_x_continuous(breaks=1:nrow(betaS.rd.sorted.1), labels=betaS.rd.sorted.1$feature) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+ 
+rfPlot =  ggplot(betaS.rf.sorted.1, aes(x=order, y=value)) +
+  geom_bar(stat = "identity", fill="white", colour="black")    +
+  labs(x = "Feature", y = "Importance", title = expression(Random~Forest)) +
+  scale_x_continuous(breaks=1:nrow(betaS.rf.sorted.1), labels=betaS.rf.sorted.1$feature) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+f4 = grid.arrange(enPlot,lsPlot,rdPlot, rfPlot, nrow = 4)
+```
+
+
+
+Create data frames with the feature index, estimated coefficient, and proportion captured. Keeps enough features to capture 80% of the total squared value of the coefficients of the elastic model.
+
+
+```{r}
+# sum of the variance square
+
+#elastic net
+valueSquare.en = betaS.en %>% mutate(valueSquare.en =  value^2) %>% arrange(desc(valueSquare.en))
+prop.en = valueSquare.en %>% mutate(proportion.en = cumsum(valueSquare.en)/ sum(valueSquare.en)) %>% arrange(desc(valueSquare.en))
+prop.en$keep <- lag(prop.en$proportion.en) < 0.80
+prop.en[is.na(prop.en)] <- TRUE
+prop.en <- prop.en[which(prop.en$keep),]  %>% arrange(desc(value))
+feature.index <- head(prop.en$feature, -1) 
+
+#en
+betaS.en = betaS.en %>% arrange(feature)
+prop.en <- betaS.en[feature.index,]
+
+#lasso
+betaS.ls = betaS.ls %>% arrange(feature)
+prop.ls <- betaS.ls[feature.index,]
+
+#ridge
+betaS.rd = betaS.rd %>% arrange(feature)
+prop.rd <- betaS.rd[feature.index,]
+
+#random forest
+betaS.rf = betaS.rf %>% arrange(feature)
+prop.rf <- betaS.rf[feature.index,]
+
+
+```
+
+
+Using the retained features, creates a new variable importance plot.
+
+
+```{r}
+prop.en$order = 1:nrow(prop.en)
+prop.ls$order = 1:nrow(prop.ls)
+prop.rd$order = 1:nrow(prop.rd)
+prop.rf$order = 1:nrow(prop.rf)
+
+colnames<-data.frame(colnames=colnames(x))
+colnames$feature<-1:nrow(colnames)
+coefs.en<-left_join(prop.en,colnames)
+coefs.ls<-left_join(prop.ls,colnames)
+coefs.rd<-left_join(prop.rd,colnames)
+coefs.rf<-left_join(prop.rf,colnames)
+
+enPlot =  ggplot(prop.en, aes(x=order, y=value)) +
+  geom_bar(stat = "identity", fill= "skyblue3", colour="black")    +
+  labs(x = element_blank(), y = "Coefficients", title = expression(Elastic)) +ylim(-0.5,0.5) +
+   scale_x_continuous(breaks=1:nrow(prop.en), labels=coefs.en$colnames)
+
+lsPlot =  ggplot(prop.ls, aes(x=order, y=value)) +
+  geom_bar(stat = "identity", fill = "white",  colour="black")    +
+  labs(x = element_blank(), y = "Coefficients", title = expression(Lasso)) + ylim(-0.5,0.5) +
+   scale_x_continuous(breaks=1:nrow(prop.ls), labels=coefs.ls$colnames)
+
+rdPlot =  ggplot(prop.rd, aes(x=order, y=value)) +
+  geom_bar(stat = "identity", fill= "white",  colour="black")    +
+  labs(x = element_blank(), y = "Coefficients", title = expression(Ridge)) + ylim(-0.5,0.5) +
+   scale_x_continuous(breaks=1:nrow(prop.rd), labels=coefs.rd$colnames)
+
+rfPlot =  ggplot(prop.rf, aes(x=order, y=value)) +
+  geom_bar(stat = "identity", fill="white", colour="black")    +
+  labs(x = "Feature", y = "Importance", title = expression(Random~Forest))+
+   scale_x_continuous(breaks=1:nrow(prop.rf), labels=coefs.rf$colnames)
+
+f4 = grid.arrange(enPlot,lsPlot,rdPlot, rfPlot, nrow = 4)
+f4
+```
+Creates a dataframe of variable names with index so that the plots can be interpreted if need be.
+
+```{r}
+colnames<-data.frame(colnames(x))
+colnames$feature<-1:nrow(colnames)
+coefs<-left_join(betaS.en,colnames)
+coefs$valuesquared<-coefs$value^2
+coefs<-coefs %>% arrange(desc(valueSquare.en))%>% mutate(proportion.en = cumsum(valuesquared)/ sum(valuesquared))
+
+```
+
